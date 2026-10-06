@@ -14,6 +14,7 @@ import { useSpecimenStore } from '../stores/specimenStore';
 import { useProcedureStore } from '../stores/procedureStore';
 import { useSupplyStore } from '../stores/supplyStore';
 import { ensureSeedData, markDbVersion, readDbVersion } from '../utils/db';
+import { subscribeOccupancy } from '../utils/multiTab';
 import SpecimenList from '../pages/SpecimenList';
 import SpecimenDetail from '../pages/SpecimenDetail';
 import ProcedureForm from '../pages/ProcedureForm';
@@ -89,8 +90,14 @@ export default function AppRouter() {
       await Promise.all([loadSpecimens(), loadProcedures(), loadSupplies()]);
       if (alive) setReady(true);
     })();
+    // 其它窗口改写占用账后，本窗口立即重拉工序、材料两本账（余量/对照说明随之失效重算）
+    const unsubscribe = subscribeOccupancy(() => {
+      void loadProcedures();
+      void loadSupplies();
+    });
     return () => {
       alive = false;
+      unsubscribe();
     };
   }, [loadSpecimens, loadProcedures, loadSupplies]);
 

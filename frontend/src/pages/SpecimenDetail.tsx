@@ -19,6 +19,7 @@ import { usePrepProgress } from '../hooks/usePrepProgress';
 import { SpecimenCard } from '../components/common/SpecimenCard';
 import { ProcedureTimeline } from '../components/common/ProcedureTimeline';
 import { db } from '../utils/db';
+import { LedgerError, toDatetimeLocalValue } from '../utils/ledger';
 import { PHOTO_STAGE_LABEL, type PrepPhoto } from '../types/photo';
 import { SPECIMEN_STATUSES, type SpecimenStatus } from '../types/specimen';
 
@@ -30,9 +31,13 @@ export default function SpecimenDetail() {
   const setStatus = useSpecimenStore((s) => s.setStatus);
   const finish = useProcedureStore((s) => s.finish);
   const rollback = useProcedureStore((s) => s.rollback);
+  const reschedule = useProcedureStore((s) => s.reschedule);
   const progress = usePrepProgress(id);
   const [photos, setPhotos] = useState<PrepPhoto[]>([]);
   const [toast, setToast] = useState('');
+  const [error, setError] = useState('');
+  const [rescheduleTarget, setRescheduleTarget] = useState<string | null>(null);
+  const [rescheduleValue, setRescheduleValue] = useState('');
 
   const loadPhotos = useCallback(async () => {
     if (!id) return;
@@ -61,6 +66,7 @@ export default function SpecimenDetail() {
 
   return (
     <Stack spacing={2}>
+      {error ? <Alert severity="error" onClose={() => setError('')}>{error}</Alert> : null}
       <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
         <Typography variant="h5" fontWeight={700}>
           标本详情 · {specimen.specimenNo}
@@ -139,10 +145,68 @@ export default function SpecimenDetail() {
                 setToast('节点已完成');
               }}
               onRollback={async (pid) => {
-                await rollback(pid);
-                setToast('节点已回退');
+                try {
+                  // store.rollback 已在事务后广播占用账变更
+                  await rollback(pid);
+                  setError('');
+                  setToast('节点已回退：领用流水作废、余量恢复，设备时段已释放');
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : '回退失败');
+                }
+              }}
+              onReschedule={(pid, ts) => {
+                setRescheduleTarget(pid);
+                setRescheduleValue(toDatetimeLocalValue(ts));
+                setError('');
               }}
             />
+            {rescheduleTarget ? (
+              <Paper variant="outlined" sx={{ p: 1.5, mt: 1.5 }}>
+                <Stack spacing={1}>
+                  <Typography variant="subtitle2">改动计划时段（设备占用与对照说明立即重算）</Typography>
+                  <TextField
+                    size="small"
+                    type="datetime-local"
+                    label="新的开始时段"
+                    value={rescheduleValue}
+                    onChange={(e) => setRescheduleValue(e.target.value)}
+                    InputLabelProps={{ shrink: true }}
+                  />
+                  <Stack direction="row" spacing={1}>
+                    <Button
+                      size="small"
+                      variant="contained"
+                      onClick={async () => {
+                        const ts = new Date(rescheduleValue).getTime();
+                        if (!Number.isFinite(ts)) {
+                          setError('时间格式无效');
+                          return;
+                        }
+                        try {
+                          await reschedule(rescheduleTarget, ts);
+                          setToast('时段已改动，占用与对照说明已重算');
+                          setRescheduleTarget(null);
+                          setError('');
+                        } catch (e) {
+                          if (e instanceof LedgerError) {
+                            setError(
+                              e.conflict
+                                ? `${e.message}：先到占用方 ${e.conflict.holderSpecimenNo} · 责任人 ${e.conflict.holderOperator}`
+                                : e.message,
+                            );
+                          }
+                        }
+                      }}
+                    >
+                      确认改时段
+                    </Button>
+                    <Button size="small" onClick={() => setRescheduleTarget(null)}>
+                      取消
+                    </Button>
+                  </Stack>
+                </Stack>
+              </Paper>
+            ) : null}
           </Paper>
 
           <Paper variant="outlined" sx={{ p: 2 }}>

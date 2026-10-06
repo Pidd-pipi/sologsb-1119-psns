@@ -1,14 +1,20 @@
 import { create } from 'zustand';
 import { db } from '../utils/db';
 import { newId } from '../utils/id';
-import type { SupplyIssue, SupplyLot, SupplyLotDraft } from '../types/supply';
+import { manualIssue } from '../utils/ledger';
+import { notifyOccupancyChanged } from '../utils/multiTab';
+import { lotBalance, type SupplyIssue, type SupplyLot, type SupplyLotDraft } from '../types/supply';
 
 interface SupplyState {
   items: SupplyLot[];
   loaded: boolean;
   load: () => Promise<void>;
   add: (draft: SupplyLotDraft) => Promise<SupplyLot>;
-  issue: (id: string, payload: Omit<SupplyIssue, 'id' | 'issuedAt'>) => Promise<void>;
+  /** 手工领用：走占用账事务，按最新流水重算余量、校保质期 */
+  issue: (
+    id: string,
+    payload: Omit<SupplyIssue, 'id' | 'issuedAt' | 'status'> & { specimenId?: string },
+  ) => Promise<void>;
   trace: (lotNo: string) => SupplyLot[];
 }
 
@@ -21,25 +27,37 @@ export const useSupplyStore = create<SupplyState>((set, get) => ({
     set({ items, loaded: true });
   },
   async add(draft) {
-    const record: SupplyLot = { ...draft, id: newId('sup'), issues: [] };
+    // 新批次入库量即初始余量，领用流水为空
+    const record: SupplyLot = {
+      ...draft,
+      id: newId('sup'),
+      qty: draft.stockQty,
+      issues: [],
+    };
     await db.supplies.put(record);
     set({ items: [...get().items, record] });
+    notifyOccupancyChanged({ type: 'supply-changed', at: Date.now() });
     return record;
   },
   async issue(id, payload) {
-    const target = get().items.find((it) => it.id === id);
-    if (!target) return;
-    const issue: SupplyIssue = { ...payload, id: newId('iss'), issuedAt: Date.now() };
-    const next: SupplyLot = {
-      ...target,
-      qty: Math.max(0, target.qty - payload.qty),
-      issues: [issue, ...target.issues],
-    };
-    await db.supplies.put(next);
-    set({ items: get().items.map((it) => (it.id === id ? next : it)) });
+    await manualIssue(id, {
+      qty: payload.qty,
+      operator: payload.operator,
+      specimenNo: payload.specimenNo,
+      specimenId: payload.specimenId,
+    });
+    // 以库里的最新记录回写，绝不拿内存余量自行扣减
+    const fresh = await db.supplies.get(id);
+    if (fresh) {
+      set({ items: get().items.map((it) => (it.id === id ? fresh : it)) });
+    }
+    notifyOccupancyChanged({ type: 'supply-issued', at: Date.now() });
   },
   trace(lotNo) {
     if (!lotNo) return get().items;
     return get().items.filter((it) => it.lotNo.includes(lotNo) || it.name.includes(lotNo));
   },
 }));
+
+/** 供页面展示的重算余量（避免页面直接拼公式） */
+export { lotBalance };

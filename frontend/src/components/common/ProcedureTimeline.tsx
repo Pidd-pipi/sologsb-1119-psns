@@ -13,13 +13,16 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import RadioButtonUncheckedIcon from '@mui/icons-material/RadioButtonUnchecked';
 import UndoIcon from '@mui/icons-material/Undo';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
-import type { PrepProcedure } from '../../types/procedure';
+import ScheduleIcon from '@mui/icons-material/Schedule';
+import type { EquipmentBooking, PrepProcedure } from '../../types/procedure';
 
 export interface ProcedureTimelineProps {
   items: PrepProcedure[];
   onFinish?: (id: string) => void;
   onRollback?: (id: string) => void;
   onOpenPhoto?: (procedureId: string) => void;
+  /** 改动计划时段：回传工序 id 与当前时段起点（页面内再弹时间选择） */
+  onReschedule?: (id: string, currentStartAt: number) => void;
 }
 
 function fmtTime(ts?: number): string {
@@ -29,11 +32,23 @@ function fmtTime(ts?: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+function BookingLine({ booking }: { booking: EquipmentBooking }) {
+  return (
+    <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap">
+      <ScheduleIcon fontSize="inherit" />
+      <Typography variant="body2" component="span">
+        {booking.lotName}（{booking.lotNo}）：{fmtTime(booking.startAt)} ~ {fmtTime(booking.endAt)}
+      </Typography>
+      <Chip size="small" variant="outlined" label={`占用方 ${booking.specimenNo} · ${booking.operator}`} />
+    </Stack>
+  );
+}
+
 /**
- * 纵向工序节点流：步骤图标、状态、耗时、环境参数折叠区。
+ * 纵向工序节点流：步骤图标、状态、耗时、环境参数折叠区、设备时段占用。
  * 被标本详情页、工序录入页消费。
  */
-export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: ProcedureTimelineProps) {
+export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto, onReschedule }: ProcedureTimelineProps) {
   const [expanded, setExpanded] = useState<string | null>(items[0]?.id ?? null);
 
   if (items.length === 0) {
@@ -51,6 +66,7 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
       {items.map((node, index) => {
         const isDone = node.state === 'done';
         const open = expanded === node.id;
+        const bookings = node.bookings ?? [];
         return (
           <Box key={node.id} sx={{ display: 'flex', gap: 1.5 }}>
             <Stack alignItems="center" sx={{ pt: 0.5 }}>
@@ -74,6 +90,11 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                   label={node.state === 'done' ? '已完成' : node.state === 'rolledback' ? '已回退' : '待办'}
                   color={isDone ? 'success' : node.state === 'rolledback' ? 'error' : 'default'}
                 />
+                {bookings.length > 0 ? (
+                  <Tooltip title={`设备占用：${bookings.map((b) => b.lotName).join('、')}`}>
+                    <Chip size="small" color="secondary" variant="outlined" icon={<ScheduleIcon />} label={`设备 ${bookings.length}`} />
+                  </Tooltip>
+                ) : null}
                 <Typography variant="caption" color="text.secondary">
                   耗时 {node.durationMin} min · 责任人 {node.operator}
                 </Typography>
@@ -86,6 +107,15 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                 {isDone && onRollback ? (
                   <Button size="small" color="warning" startIcon={<UndoIcon />} onClick={() => onRollback(node.id)}>
                     回退节点
+                  </Button>
+                ) : null}
+                {!isDone && node.state !== 'rolledback' && onReschedule ? (
+                  <Button
+                    size="small"
+                    startIcon={<ScheduleIcon />}
+                    onClick={() => onReschedule(node.id, node.planStartAt ?? node.startedAt)}
+                  >
+                    改时段
                   </Button>
                 ) : null}
                 <Tooltip title={open ? '收起环境参数' : '展开环境参数'}>
@@ -110,6 +140,7 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                     环境：{node.tempC} ℃ / RH {node.rh} %
                   </Typography>
                   <Typography variant="body2">开始：{fmtTime(node.startedAt)}</Typography>
+                  <Typography variant="body2">计划时段：{fmtTime(node.planStartAt ?? node.startedAt)}</Typography>
                   <Typography variant="body2">结束：{fmtTime(node.finishedAt)}</Typography>
                   <Typography variant="body2">
                     影像：前 {node.photoBeforeIds.length} 张 / 后 {node.photoAfterIds.length} 张
@@ -120,6 +151,18 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                     </Button>
                   ) : null}
                 </Stack>
+                {bookings.length > 0 ? (
+                  <Box sx={{ mt: 1 }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+                      设备时段占用账（回退即释放）：
+                    </Typography>
+                    <Stack spacing={0.5}>
+                      {bookings.map((b) => (
+                        <BookingLine key={`${b.lotId}-${b.startAt}`} booking={b} />
+                      ))}
+                    </Stack>
+                  </Box>
+                ) : null}
               </Collapse>
             </Paper>
           </Box>

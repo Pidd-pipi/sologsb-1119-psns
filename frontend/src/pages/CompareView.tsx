@@ -14,12 +14,20 @@ import DownloadIcon from '@mui/icons-material/Download';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { useProcedureStore } from '../stores/procedureStore';
+import { useSupplyStore } from '../stores/supplyStore';
 import { useSpecimenSearch } from '../hooks/useSpecimenSearch';
 import { usePrepProgress } from '../hooks/usePrepProgress';
 import { BeforeAfterSlider } from '../components/common/BeforeAfterSlider';
 import { db } from '../utils/db';
 import { makeSketchDataUrl, PHOTO_STAGE_LABEL, type PrepPhoto } from '../types/photo';
 import { hardnessLabel } from '../utils/unitConvert';
+
+function fmtStmtTime(ts?: number): string {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
 /** /compare/:specimenId 前后对照滑块联看 + 导出对照说明文本 */
 export default function CompareView() {
@@ -28,6 +36,8 @@ export default function CompareView() {
   const specimens = useSpecimenStore((s) => s.items);
   const { result } = useSpecimenSearch();
   const procedures = useProcedureStore((s) => s.items);
+  // 订阅材料占用账：回退/改时段/领用后，对照说明立即失效重算
+  const supplies = useSupplyStore((s) => s.items);
   const progress = usePrepProgress(specimenId || undefined);
 
   const [photos, setPhotos] = useState<PrepPhoto[]>([]);
@@ -85,9 +95,34 @@ export default function CompareView() {
     lines.push(`修复前影像：${before ? `${PHOTO_STAGE_LABEL[before.stage]} · ${before.caption}` : '未选'}`);
     lines.push(`修复后影像：${after ? `${PHOTO_STAGE_LABEL[after.stage]} · ${after.caption}` : '未选'}`);
     lines.push(`对照标注：${markers.length === 0 ? '无' : markers.map((m) => `${m.id} ${m.text}`).join('；')}`);
+
+    // 设备时段占用账（回退/改时段后随 progress/supplies 重算，旧说明自然失效）
+    const bookingLines: string[] = [];
+    for (const node of progress.list) {
+      if (node.state === 'rolledback') continue;
+      for (const b of node.bookings ?? []) {
+        bookingLines.push(
+          `#${node.seq} ${node.nodeName} 占用 ${b.lotName}（${b.lotNo}）${fmtStmtTime(b.startAt)}~${fmtStmtTime(b.endAt)} · ${b.operator}`,
+        );
+      }
+    }
+    lines.push(`设备时段占用：${bookingLines.length === 0 ? '无' : bookingLines.join('；')}`);
+
+    // 材料领用占用（按批次最新流水，回退节点的领用已作废不计）
+    const materialLines: string[] = [];
+    const activeProcIds = new Set(progress.list.filter((n) => n.state !== 'rolledback').map((n) => n.id));
+    for (const lot of supplies) {
+      for (const it of lot.issues) {
+        if (it.status === 'voided') continue;
+        if (it.specimenId && it.specimenId !== specimen.id) continue;
+        if (it.procedureId && !activeProcIds.has(it.procedureId)) continue;
+        materialLines.push(`${lot.name}(${lot.lotNo}) ${it.qty}${lot.unit} · ${it.operator}${it.backfilled ? '〔按耗时回填〕' : ''}`);
+      }
+    }
+    lines.push(`材料领用占用：${materialLines.length === 0 ? '无' : materialLines.join('；')}`);
     lines.push(`导出时间：${new Date().toLocaleString('zh-CN')}`);
     return lines.join('\n');
-  }, [specimen, progress, before, after, markers]);
+  }, [specimen, progress, before, after, markers, supplies]);
 
   const download = () => {
     const blob = new Blob([statement], { type: 'text/plain;charset=utf-8' });

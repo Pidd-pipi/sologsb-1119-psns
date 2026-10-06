@@ -43,6 +43,26 @@ export const STEP_FIELD_MAP: Record<
 /** 工序节点状态 */
 export type ProcedureState = 'pending' | 'done' | 'rolledback';
 
+/** 设备时段占用（一道工序对一台工具类批次的占用账，与工序节点、标本档案同一份） */
+export interface EquipmentBooking {
+  /** 被占用的材料批次（设备）id */
+  lotId: string;
+  /** 设备名（冗余存，列表展示免联查） */
+  lotName: string;
+  /** 批号 */
+  lotNo: string;
+  /** 占用开始时刻（含时段日期，绝对时间戳） */
+  startAt: number;
+  /** 占用结束时刻 */
+  endAt: number;
+  /** 提交占用的先后序号，冲突时只留先到者 */
+  claimedAt: number;
+  /** 责任人 */
+  operator: string;
+  /** 标本号（冗余，用于当场显示占用方） */
+  specimenNo: string;
+}
+
 /** 修复工序 */
 export interface PrepProcedure {
   id: string;
@@ -72,6 +92,28 @@ export interface PrepProcedure {
   startedAt: number;
   state: ProcedureState;
   finishedAt?: number;
+  /**
+   * 计划占用时段开始（设备排程用）。
+   * 与 startedAt 分开：startedAt 是登记时刻，planStartAt 是技师实际预约的开罐时段。
+   */
+  planStartAt?: number;
+  /** 设备时段占用账，按 tools 中命中的工具类批次登记 */
+  bookings?: EquipmentBooking[];
+  /** 提交时命中过的设备冲突（回退后随重算清空） */
+  bookingConflict?: string;
+  /** 领用的胶种批次（写入同一份占用账：供应批次 issues 中回写 procedureId） */
+  adhesiveLotId?: string;
+  /** 领用磨料批次 */
+  abrasiveLotId?: string;
+  /** 领用数量（胶种，单位与批次一致） */
+  adhesiveQty?: number;
+  /** 领用数量（磨料） */
+  abrasiveQty?: number;
 }
 
 export type PrepProcedureDraft = Omit<PrepProcedure, 'id'>;
+
+/** 两个半开时段是否重叠（边界相接不算冲突） */
+export function rangesOverlap(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
+  return aStart < bEnd && bStart < aEnd;
+}
