@@ -22,7 +22,16 @@ import AddIcon from '@mui/icons-material/Add';
 import { useSupplyStore } from '../stores/supplyStore';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { MeasureField } from '../components/common/MeasureField';
-import { SUPPLY_KINDS, isLowStock, shelfLifeLeftDays, type SupplyKind, type SupplyLot, type SupplyLotDraft } from '../types/supply';
+import {
+  SUPPLY_KINDS,
+  isLowStock,
+  remainingQty,
+  shelfLifeLeftDays,
+  type SupplyKind,
+  type SupplyLot,
+  type SupplyLotDraft,
+} from '../types/supply';
+import { LedgerReject } from '../utils/ledger';
 
 const EMPTY_DRAFT: SupplyLotDraft = {
   name: '',
@@ -36,7 +45,7 @@ const EMPTY_DRAFT: SupplyLotDraft = {
   lowThreshold: 2,
 };
 
-/** /supplies 工具材料台账：按种类分组、批号追溯、低量行高亮 */
+/** /supplies 工具材料台账：按种类分组、批号追溯、低量行高亮、领用走统一占用账 */
 export default function SupplyList() {
   const lots = useSupplyStore((s) => s.items);
   const addLot = useSupplyStore((s) => s.add);
@@ -83,24 +92,33 @@ export default function SupplyList() {
 
   const submitIssue = async () => {
     if (!issueTarget) return;
-    if (issueQty <= 0 || issueQty > issueTarget.qty) {
-      setError(`领用数量需在 1 ~ ${issueTarget.qty} ${issueTarget.unit} 之间`);
+    setError('');
+    const targetRemaining = remainingQty(issueTarget);
+    if (issueQty <= 0 || issueQty > targetRemaining) {
+      setError(`领用数量需在 1 ~ ${targetRemaining} ${issueTarget.unit} 之间`);
       return;
     }
     if (!issueOperator.trim()) {
       setError('领用人必填');
       return;
     }
-    await issue(issueTarget.id, {
-      qty: issueQty,
-      operator: issueOperator.trim(),
-      specimenNo: issueSpecimen || '未关联标本',
-    });
-    setIssueTarget(null);
-    setIssueQty(1);
-    setIssueOperator('');
-    setError('');
-    setToast('领用已登记');
+    const specimen = specimens.find((s) => s.specimenNo === issueSpecimen);
+    try {
+      await issue(issueTarget.id, {
+        qty: issueQty,
+        operator: issueOperator.trim(),
+        specimenNo: issueSpecimen || '未关联标本',
+        specimenId: specimen?.id,
+      });
+      setIssueTarget(null);
+      setIssueQty(1);
+      setIssueOperator('');
+      setError('');
+      setToast('领用已登记，余量已按领用记录重算');
+    } catch (e) {
+      // 余量不足 / 过期：事务已回滚，当场退回
+      setError(e instanceof LedgerReject ? e.message : e instanceof Error ? e.message : '领用失败');
+    }
   };
 
   const lowCount = lots.filter(isLowStock).length;
@@ -113,6 +131,7 @@ export default function SupplyList() {
         </Typography>
         <Chip size="small" label={`共 ${lots.length} 个批次`} />
         <Chip size="small" color={lowCount > 0 ? 'warning' : 'default'} label={`低量 ${lowCount} 项`} />
+        <Chip size="small" variant="outlined" label="余量 = 初始量 − 有效领用（实时重算）" />
         <Box sx={{ flex: 1 }} />
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
           登记批次
@@ -167,10 +186,12 @@ export default function SupplyList() {
                   <TableCell>名称</TableCell>
                   <TableCell>规格</TableCell>
                   <TableCell>批号</TableCell>
-                  <TableCell align="right">在库</TableCell>
+                  <TableCell align="right">初始量</TableCell>
+                  <TableCell align="right">已领</TableCell>
+                  <TableCell align="right">余量</TableCell>
                   <TableCell align="right">低量阈值</TableCell>
                   <TableCell align="right">剩余保质期</TableCell>
-                  <TableCell>最近领用</TableCell>
+                  <TableCell>最近有效领用</TableCell>
                   <TableCell align="right">操作</TableCell>
                 </TableRow>
               </TableHead>
@@ -178,38 +199,49 @@ export default function SupplyList() {
                 {group.rows.map((lot) => {
                   const low = isLowStock(lot);
                   const left = shelfLifeLeftDays(lot);
+                  const used = lot.issues
+                    .filter((it) => !it.voided)
+                    .reduce((sum, it) => sum + it.qty, 0);
+                  const remain = remainingQty(lot);
+                  const latest = lot.issues.find((it) => !it.voided);
                   return (
                     <TableRow
                       key={lot.id}
                       hover
                       data-testid={`supply-row-${lot.lotNo}`}
-                      sx={low ? { bgcolor: 'warning.light' } : undefined}
+                      sx={low ? { bgcolor: 'warning.light' } : left < 0 ? { bgcolor: 'error.light' } : undefined}
                     >
                       <TableCell>
                         {lot.name}
                         {low ? <Chip size="small" color="warning" label="低量" sx={{ ml: 1 }} /> : null}
+                        {left < 0 ? <Chip size="small" color="error" label="已过期" sx={{ ml: 1 }} /> : null}
                       </TableCell>
                       <TableCell>{lot.spec}</TableCell>
                       <TableCell>{lot.lotNo}</TableCell>
                       <TableCell align="right">
                         {lot.qty} {lot.unit}
                       </TableCell>
+                      <TableCell align="right">{used}</TableCell>
+                      <TableCell align="right" data-testid={`supply-remain-${lot.lotNo}`}>
+                        <b>{remain}</b> {lot.unit}
+                      </TableCell>
                       <TableCell align="right">{lot.lowThreshold}</TableCell>
                       <TableCell align="right">
                         {left < 0 ? <Chip size="small" color="error" label={`已过期 ${-left} 天`} /> : `${left} 天`}
                       </TableCell>
                       <TableCell>
-                        {lot.issues.length === 0
+                        {!latest
                           ? '—'
-                          : `${lot.issues[0].operator} 领 ${lot.issues[0].qty} ${lot.unit}（${lot.issues[0].specimenNo}）`}
+                          : `${latest.operator} 领 ${latest.qty} ${lot.unit}（${latest.specimenNo}）${latest.backfilled ? ' · 回填' : ''}`}
                       </TableCell>
                       <TableCell align="right">
                         <Button
                           size="small"
-                          disabled={lot.qty <= 0}
+                          disabled={remain <= 0 || left < 0}
                           onClick={() => {
                             setIssueTarget(lot);
                             setIssueQty(1);
+                            setIssueOperator('');
                             setError('');
                           }}
                         >
@@ -222,14 +254,21 @@ export default function SupplyList() {
               </TableBody>
             </Table>
           )}
-          {group.rows.some((r) => r.issues.length > 1) ? (
+          {group.rows.some((r) => r.issues.length > 0) ? (
             <Stack spacing={0.5} sx={{ mt: 1 }}>
               {group.rows
-                .filter((r) => r.issues.length > 1)
+                .filter((r) => r.issues.length > 0)
                 .map((r) => (
-                  <Typography key={r.id} variant="caption" color="text.secondary">
+                  <Typography key={r.id} variant="caption" color="text.secondary" data-testid={`supply-issues-${r.lotNo}`}>
                     批号 {r.lotNo} 的领用明细：
-                    {r.issues.map((i) => `${i.operator} ${i.qty}${r.unit}→${i.specimenNo}`).join('；')}
+                    {r.issues
+                      .map(
+                        (i) =>
+                          `${i.voided ? '（作废）' : ''}${i.operator} ${i.qty}${r.unit}→${i.specimenNo}${
+                            i.backfilled ? '[耗时回填]' : ''
+                          }${i.source === 'manual' ? '[手工]' : '[工序]'}`,
+                      )
+                      .join('；')}
                   </Typography>
                 ))}
             </Stack>
@@ -292,7 +331,7 @@ export default function SupplyList() {
             <Stack direction="row" spacing={1.5}>
               <Box sx={{ flex: 1 }}>
                 <MeasureField
-                  label="在库数量"
+                  label="初始在库数量"
                   unit={draft.unit}
                   min={0}
                   max={100000}
@@ -343,14 +382,15 @@ export default function SupplyList() {
             {error ? <Alert severity="error">{error}</Alert> : null}
             {issueTarget ? (
               <Typography variant="body2" color="text.secondary">
-                批号 {issueTarget.lotNo} · 现存 {issueTarget.qty} {issueTarget.unit}
+                批号 {issueTarget.lotNo} · 当前余量 {remainingQty(issueTarget)} {issueTarget.unit}（按已有领用记录重算）
+                {shelfLifeLeftDays(issueTarget) < 0 ? ' · 已过保质期，禁止领用' : ''}
               </Typography>
             ) : null}
             <MeasureField
               label="领用数量"
               unit={issueTarget?.unit ?? '件'}
               min={1}
-              max={issueTarget?.qty ?? 1}
+              max={issueTarget ? Math.max(1, remainingQty(issueTarget)) : 1}
               step={1}
               value={issueQty}
               onChange={setIssueQty}

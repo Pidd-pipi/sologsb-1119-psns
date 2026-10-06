@@ -3,11 +3,13 @@ import type { Specimen } from '../types/specimen';
 import type { PrepProcedure } from '../types/procedure';
 import type { SupplyLot } from '../types/supply';
 import type { PrepPhoto } from '../types/photo';
+import type { EquipmentOccupation } from '../types/occupation';
 import { makeSketchDataUrl } from '../types/photo';
 import { newId } from './id';
+import { backfillLegacyOccupancy } from './backfill';
 
 /** 当前数据结构版本，写入 localStorage 便于回显 */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const DB_NAME = 'gbfossilprep';
 export const LS_VERSION_KEY = 'gbfossilprep:db-version';
 
@@ -16,6 +18,8 @@ class FossilPrepDB extends Dexie {
   procedures!: Table<PrepProcedure, string>;
   supplies!: Table<SupplyLot, string>;
   photos!: Table<PrepPhoto, string>;
+  /** 统一占用账（设备时段侧） */
+  occupations!: Table<EquipmentOccupation, string>;
 
   constructor() {
     super(DB_NAME);
@@ -54,6 +58,37 @@ class FossilPrepDB extends Dexie {
             if (row.lowThreshold === undefined) row.lowThreshold = 1;
           });
       });
+    // v3：统一占用账 —— 新增 occupations 表；工序加 planStart；旧工序按耗时回填领用与占用
+    this.version(3)
+      .stores({
+        specimens: 'id, specimenNo, taxon, locality, status, createdAt',
+        procedures: 'id, specimenId, seq, stepType, state, startedAt, planStart',
+        supplies: 'id, kind, lotNo, name, openedAt',
+        photos: 'id, specimenId, procedureId, stage, capturedAt',
+        occupations: 'id, equipment, status, startAt, endAt, claimedAt, procedureId, specimenId',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('procedures')
+          .toCollection()
+          .modify((row: any) => {
+            if (row.planStart === undefined) row.planStart = row.startedAt ?? Date.now();
+            if (row.tools === undefined) row.tools = [];
+          });
+        await tx
+          .table('supplies')
+          .toCollection()
+          .modify((row: any) => {
+            if (!row.issues) row.issues = [];
+          });
+        // 旧数据缺领用记录的工序，按耗时回填一条消耗；缺设备占用的补一条时段占用
+        await backfillLegacyOccupancy({
+          procedures: tx.table('procedures'),
+          supplies: tx.table('supplies'),
+          specimens: tx.table('specimens'),
+          occupations: tx.table('occupations'),
+        });
+      });
   }
 }
 
@@ -80,7 +115,16 @@ export function readDbVersion(): number {
 /** 首次进入时灌入一条示范档案，保证页面非空壳 */
 export async function ensureSeedData(): Promise<void> {
   const count = await db.specimens.count();
-  if (count > 0) return;
+  if (count > 0) {
+    // 老库（v3 之前已有数据）也兜一次底，保证缺记录的旧工序都补齐占用账（幂等）
+    await backfillLegacyOccupancy({
+      procedures: db.procedures,
+      supplies: db.supplies,
+      specimens: db.specimens,
+      occupations: db.occupations,
+    });
+    return;
+  }
 
   const now = Date.now();
   const day = 24 * 3600 * 1000;
@@ -118,6 +162,14 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
+  // 真空浸渗罐时段：第一道加固占用明天 09:00–10:30
+  const tankStart = dayStart(now + 1 * day) + 9 * 3600 * 1000;
+  const proc1Start = now - 10 * day;
+  const proc2Start = tankStart;
+  const proc2Duration = 90;
+  const proc2Id = newId('prc');
+  const occ2Id = newId('occ');
+
   const procedures: PrepProcedure[] = [
     {
       id: newId('prc'),
@@ -130,26 +182,31 @@ export async function ensureSeedData(): Promise<void> {
       adhesive: '',
       adhesiveConc: 0,
       durationMin: 145,
+      planStart: proc1Start,
       tempC: 22,
       rh: 48,
       photoBeforeIds: [],
       photoAfterIds: [],
       operator: '林砚秋',
-      startedAt: now - 10 * day,
+      startedAt: proc1Start,
       state: 'done',
-      finishedAt: now - 10 * day + 145 * 60000,
+      finishedAt: proc1Start + 145 * 60000,
     },
     {
-      id: newId('prc'),
+      id: proc2Id,
       specimenId,
       stepType: '加固',
       nodeName: '围岩裂隙渗透加固',
       seq: 2,
-      tools: ['渗透滴管'],
+      tools: ['渗透滴管', '真空浸渗罐'],
       abrasive: '',
       adhesive: 'Paraloid B-72',
       adhesiveConc: 5,
-      durationMin: 90,
+      adhesiveLotId: 'seed-lot-b72',
+      adhesiveIssueQty: 1,
+      occupationId: occ2Id,
+      durationMin: proc2Duration,
+      planStart: proc2Start,
       tempC: 23,
       rh: 45,
       photoBeforeIds: [],
@@ -157,6 +214,24 @@ export async function ensureSeedData(): Promise<void> {
       operator: '林砚秋',
       startedAt: now - 6 * day,
       state: 'pending',
+    },
+  ];
+
+  const occupations: EquipmentOccupation[] = [
+    {
+      id: occ2Id,
+      equipment: '真空浸渗罐',
+      startAt: proc2Start,
+      endAt: proc2Start + proc2Duration * 60000,
+      claimedAt: now - 6 * day,
+      procedureId: proc2Id,
+      nodeName: '围岩裂隙渗透加固',
+      stepType: '加固',
+      operator: '林砚秋',
+      specimenId,
+      specimenNo: 'FP-2024-0031',
+      seq: 2,
+      status: 'active',
     },
   ];
 
@@ -185,7 +260,7 @@ export async function ensureSeedData(): Promise<void> {
 
   const supplies: SupplyLot[] = [
     {
-      id: newId('sup'),
+      id: 'seed-lot-b72',
       name: 'Paraloid B-72',
       kind: '胶种',
       spec: '分析纯 500 g',
@@ -201,9 +276,27 @@ export async function ensureSeedData(): Promise<void> {
           qty: 1,
           operator: '林砚秋',
           specimenNo: 'FP-2024-0031',
+          specimenId,
+          procedureId: proc2Id,
+          source: 'procedure',
+          lotName: 'Paraloid B-72',
+          lotNo: 'B72-20240312',
           issuedAt: now - 6 * day,
         },
       ],
+    },
+    {
+      id: newId('sup'),
+      name: '氰基丙烯酸酯',
+      kind: '胶种',
+      spec: '快固 20 g',
+      lotNo: 'CA-20230110',
+      qty: 6,
+      unit: '支',
+      openedAt: now - 400 * day,
+      shelfLifeMonths: 12,
+      lowThreshold: 2,
+      issues: [],
     },
     {
       id: newId('sup'),
@@ -231,25 +324,20 @@ export async function ensureSeedData(): Promise<void> {
       lowThreshold: 5,
       issues: [],
     },
-    {
-      id: newId('sup'),
-      name: '超声波清洗机',
-      kind: '工具',
-      spec: '6 L / 40 kHz',
-      lotNo: 'US-6L-01',
-      qty: 1,
-      unit: '台',
-      openedAt: now - 200 * day,
-      shelfLifeMonths: 120,
-      lowThreshold: 1,
-      issues: [],
-    },
   ];
 
-  await db.transaction('rw', db.specimens, db.procedures, db.supplies, db.photos, async () => {
+  await db.transaction('rw', db.specimens, db.procedures, db.supplies, db.photos, db.occupations, async () => {
     await db.specimens.bulkPut(specimens);
     await db.procedures.bulkPut(procedures);
     await db.supplies.bulkPut(supplies);
     await db.photos.bulkPut(photos);
+    await db.occupations.bulkPut(occupations);
   });
+}
+
+/** 当天 00:00 */
+function dayStart(ts: number): number {
+  const d = new Date(ts);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
 }

@@ -15,6 +15,8 @@ import AddIcon from '@mui/icons-material/Add';
 import CompareIcon from '@mui/icons-material/Compare';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { useProcedureStore } from '../stores/procedureStore';
+import { useSupplyStore } from '../stores/supplyStore';
+import { useOccupationStore } from '../stores/occupationStore';
 import { usePrepProgress } from '../hooks/usePrepProgress';
 import { SpecimenCard } from '../components/common/SpecimenCard';
 import { ProcedureTimeline } from '../components/common/ProcedureTimeline';
@@ -30,6 +32,9 @@ export default function SpecimenDetail() {
   const setStatus = useSpecimenStore((s) => s.setStatus);
   const finish = useProcedureStore((s) => s.finish);
   const rollback = useProcedureStore((s) => s.rollback);
+  const reschedule = useProcedureStore((s) => s.reschedule);
+  const loadSupplies = useSupplyStore((s) => s.load);
+  const loadOccupations = useOccupationStore((s) => s.load);
   const progress = usePrepProgress(id);
   const [photos, setPhotos] = useState<PrepPhoto[]>([]);
   const [toast, setToast] = useState('');
@@ -140,7 +145,13 @@ export default function SpecimenDetail() {
               }}
               onRollback={async (pid) => {
                 await rollback(pid);
-                setToast('节点已回退');
+                await Promise.all([loadSupplies(), loadOccupations()]);
+                setToast('节点已回退：设备占用与领用已作废，余量与对照已重算');
+              }}
+              onReschedule={async (_pid, newStartAt) => {
+                await reschedule(_pid, newStartAt);
+                await loadOccupations();
+                setToast('时段已改动，占用账已按新时段重算');
               }}
             />
           </Paper>

@@ -13,11 +13,13 @@ import Chip from '@mui/material/Chip';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { useProcedureStore } from '../stores/procedureStore';
 import { useSupplyStore } from '../stores/supplyStore';
+import { useOccupationStore } from '../stores/occupationStore';
 import { ensureSeedData, markDbVersion, readDbVersion } from '../utils/db';
 import SpecimenList from '../pages/SpecimenList';
 import SpecimenDetail from '../pages/SpecimenDetail';
 import ProcedureForm from '../pages/ProcedureForm';
 import SupplyList from '../pages/SupplyList';
+import OccupancyBoard from '../pages/OccupancyBoard';
 import CompareView from '../pages/CompareView';
 
 function Shell() {
@@ -32,11 +34,19 @@ function Shell() {
       { label: '标本台账', path: '/specimens' },
       { label: '工序录入', path: '/procedures/new' },
       { label: '材料台账', path: '/supplies' },
+      { label: '占用台账', path: '/occupations' },
       { label: '前后对照', path: firstId ? `/compare/${firstId}` : '/specimens' },
     ];
   }, [specimens]);
 
-  const active = navItems.findIndex((item) => location.pathname.startsWith(item.path.split('/').slice(0, 2).join('/')));
+  const active = (() => {
+    const path = location.pathname;
+    if (path.startsWith('/compare')) return navItems.findIndex((i) => i.path.startsWith('/compare'));
+    if (path.startsWith('/occupations')) return 3;
+    if (path.startsWith('/supplies')) return 2;
+    if (path.startsWith('/procedures')) return 1;
+    return 0;
+  })();
 
   return (
     <Box sx={{ minHeight: '100vh', bgcolor: 'grey.50' }}>
@@ -66,6 +76,7 @@ function Shell() {
           <Route path="/specimens/:id" element={<SpecimenDetail />} />
           <Route path="/procedures/new" element={<ProcedureForm />} />
           <Route path="/supplies" element={<SupplyList />} />
+          <Route path="/occupations" element={<OccupancyBoard />} />
           <Route path="/compare/:specimenId" element={<CompareView />} />
           <Route path="*" element={<Navigate to="/specimens" replace />} />
         </Routes>
@@ -80,19 +91,20 @@ export default function AppRouter() {
   const loadSpecimens = useSpecimenStore((s) => s.load);
   const loadProcedures = useProcedureStore((s) => s.load);
   const loadSupplies = useSupplyStore((s) => s.load);
+  const loadOccupations = useOccupationStore((s) => s.load);
 
   useEffect(() => {
     let alive = true;
     (async () => {
       await ensureSeedData();
       await markDbVersion();
-      await Promise.all([loadSpecimens(), loadProcedures(), loadSupplies()]);
+      await Promise.all([loadSpecimens(), loadProcedures(), loadSupplies(), loadOccupations()]);
       if (alive) setReady(true);
     })();
     return () => {
       alive = false;
     };
-  }, [loadSpecimens, loadProcedures, loadSupplies]);
+  }, [loadSpecimens, loadProcedures, loadSupplies, loadOccupations]);
 
   if (!ready) {
     return (

@@ -40,6 +40,14 @@ export const STEP_FIELD_MAP: Record<
   },
 };
 
+/** 需要争用「同一台」的设备（同一时段只能有一道工序占用） */
+export const SHARED_EQUIPMENT: string[] = ['真空浸渗罐'];
+
+/** 判断一件工具是否属于需按时段独占的设备 */
+export function isSharedEquipment(tool: string): boolean {
+  return SHARED_EQUIPMENT.includes(tool);
+}
+
 /** 工序节点状态 */
 export type ProcedureState = 'pending' | 'done' | 'rolledback';
 
@@ -60,8 +68,16 @@ export interface PrepProcedure {
   adhesive: string;
   /** 胶液浓度 % */
   adhesiveConc: number;
+  /** 计划占用的胶种批次（同一份占用账的材料侧） */
+  adhesiveLotId?: string;
+  /** 本次领用胶种数量（单位随批次） */
+  adhesiveIssueQty?: number;
+  /** 占用账（设备时段）记录 id，提交成功后回填 */
+  occupationId?: string;
   /** 耗时 min */
   durationMin: number;
+  /** 计划开始占用设备的时间（时段起点） */
+  planStart: number;
   /** 环境温度 ℃ */
   tempC: number;
   /** 相对湿度 % */

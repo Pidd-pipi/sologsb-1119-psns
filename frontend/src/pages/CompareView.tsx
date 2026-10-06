@@ -14,12 +14,15 @@ import DownloadIcon from '@mui/icons-material/Download';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { useProcedureStore } from '../stores/procedureStore';
+import { useSupplyStore } from '../stores/supplyStore';
+import { useOccupationStore } from '../stores/occupationStore';
 import { useSpecimenSearch } from '../hooks/useSpecimenSearch';
 import { usePrepProgress } from '../hooks/usePrepProgress';
 import { BeforeAfterSlider } from '../components/common/BeforeAfterSlider';
 import { db } from '../utils/db';
 import { makeSketchDataUrl, PHOTO_STAGE_LABEL, type PrepPhoto } from '../types/photo';
 import { hardnessLabel } from '../utils/unitConvert';
+import { fmtDateTime } from '../types/occupation';
 
 /** /compare/:specimenId 前后对照滑块联看 + 导出对照说明文本 */
 export default function CompareView() {
@@ -28,6 +31,8 @@ export default function CompareView() {
   const specimens = useSpecimenStore((s) => s.items);
   const { result } = useSpecimenSearch();
   const procedures = useProcedureStore((s) => s.items);
+  const lots = useSupplyStore((s) => s.items);
+  const occupations = useOccupationStore((s) => s.items);
   const progress = usePrepProgress(specimenId || undefined);
 
   const [photos, setPhotos] = useState<PrepPhoto[]>([]);
@@ -64,6 +69,34 @@ export default function CompareView() {
     [progress.list],
   );
 
+  /**
+   * 统一占用账在对照说明里的投影：
+   * 只统计该标本未回退工序的「占用中」设备时段与「有效」领用记录。
+   * 工序回退或时段改动后这些数据立即失效，重算后自然不再出现在导出文本里。
+   */
+  const ledgerLines = useMemo(() => {
+    const activeProcs = new Set(progress.list.filter((n) => n.state !== 'rolledback').map((n) => n.id));
+    const occLines = occupations
+      .filter((o) => o.specimenId === specimenId && o.status === 'active')
+      .map(
+        (o) =>
+          `  · ${o.equipment}：${fmtDateTime(o.startAt)} ~ ${fmtDateTime(o.endAt)}（#${o.seq} ${o.nodeName}，责任人 ${o.operator}）`,
+      );
+    const issueLines: string[] = [];
+    for (const lot of lots) {
+      for (const it of lot.issues) {
+        if (!it.voided && it.procedureId && activeProcs.has(it.procedureId)) {
+          issueLines.push(
+            `  · ${it.lotName ?? lot.name} 批号 ${it.lotNo ?? lot.lotNo}：领 ${it.qty} ${lot.unit}（#${
+              progress.list.find((n) => n.id === it.procedureId)?.seq ?? '?'
+            }，${it.operator}）${it.backfilled ? '[旧工序耗时回填]' : ''}`,
+          );
+        }
+      }
+    }
+    return { occLines, issueLines };
+  }, [occupations, lots, progress.list, specimenId]);
+
   const statement = useMemo(() => {
     if (!specimen) return '';
     const lines: string[] = [];
@@ -85,9 +118,14 @@ export default function CompareView() {
     lines.push(`修复前影像：${before ? `${PHOTO_STAGE_LABEL[before.stage]} · ${before.caption}` : '未选'}`);
     lines.push(`修复后影像：${after ? `${PHOTO_STAGE_LABEL[after.stage]} · ${after.caption}` : '未选'}`);
     lines.push(`对照标注：${markers.length === 0 ? '无' : markers.map((m) => `${m.id} ${m.text}`).join('；')}`);
+    lines.push(`设备占用（占用账实时投影，回退/改期即失效）：`);
+    lines.push(...(ledgerLines.occLines.length ? ledgerLines.occLines : ['  · 无']));
+    lines.push(`材料领用（仅统计未作废记录，余量按其重算）：`);
+    lines.push(...(ledgerLines.issueLines.length ? ledgerLines.issueLines : ['  · 无']));
+    lines.push(`重算时间：${new Date().toLocaleString('zh-CN')}`);
     lines.push(`导出时间：${new Date().toLocaleString('zh-CN')}`);
     return lines.join('\n');
-  }, [specimen, progress, before, after, markers]);
+  }, [specimen, progress, before, after, markers, ledgerLines]);
 
   const download = () => {
     const blob = new Blob([statement], { type: 'text/plain;charset=utf-8' });
